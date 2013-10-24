@@ -1,0 +1,89 @@
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+
+apply plugin: "groovy"
+apply plugin: "idea"
+apply plugin: "eclipse"
+
+repositories {
+    jcenter()
+    maven { url "http://repo.springsource.org/repo" } // for springloaded
+}
+
+configurations {
+    springloaded
+}
+
+dependencies {
+    // Change springloaded version here
+    springloaded "org.springsource.springloaded:springloaded-core:1.1.1"
+
+
+    compile 'org.codehaus.groovy:groovy-all:2.1.7'
+    compile 'org.codehaus.groovy.modules.remote:remote-transport-http:0.5'
+    testCompile 'org.codehaus.groovy.modules.remote:remote-core:0.5'
+
+    testCompile 'org.spockframework:spock-core:0.7-groovy-2.0', {
+        exclude group: "org.codehaus.groovy"
+    }
+}
+
+def agentArgs = []
+if (!hasProperty("noSpringLoaded")) {
+    agentArgs <<
+            "-javaagent:$configurations.springloaded.singleFile.absolutePath" <<
+            "-noverify"
+}
+
+
+task startApp {
+    inputs.files sourceSets.main.output + configurations.runtime
+    doLast {
+        def jvm = org.gradle.internal.jvm.Jvm.current()
+        def javaBinary = jvm.javaExecutable.absolutePath
+
+        ext.process = new ProcessBuilder(javaBinary, *agentArgs, "-cp", inputs.files.asPath, "Server").
+                redirectErrorStream(true).
+                directory(projectDir).
+                start()
+
+        Thread.addShutdownHook {
+            process.destroy()
+        }
+
+        def latch = new CountDownLatch(1)
+        Thread.start {
+            try {
+                process.inputStream.eachLine { String line ->
+                    if (latch.count) {
+                        println "server: $line"
+                        if (line.endsWith("started")) {
+                            latch.countDown()
+                        }
+                    } else {
+                        println "server: $line"
+                    }
+                }
+            } catch (IOException ignore) {}
+        }
+
+        if (!latch.await(10, TimeUnit.SECONDS)) {
+            throw new RuntimeException("Timeout waiting for server to start")
+        }
+    }
+}
+
+task stopApp {
+    doLast {
+        startApp.process.destroy()
+    }
+}
+
+task runScript(type: JavaExec) {
+    main "Script"
+    dependsOn startApp
+    finalizedBy stopApp
+
+    jvmArgs agentArgs
+    classpath = test.classpath
+}
